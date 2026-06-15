@@ -1,0 +1,87 @@
+[package]
+name = "tracing-reload"
+description = "Tracing layer that can be safely reloaded"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+homepage = "https://github.com/mladedav/tracing-reload"
+keywords = ["logging", "tracing", "reload", "subscriber", "layer"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/mladedav/tracing-reload"
+
+[features]
+default = []
+tracing-log = ["dep:tracing-log"]
+
+[dependencies]
+tracing = { version = "0.1.40", default-features = false, features = ["std"] }
+tracing-core = { version = "0.1.32", default-features = false }
+tracing-subscriber = { version = "0.3.18", default-features = false, features = [
+    "std",
+    "registry",
+    "fmt",
+] }
+tracing-log = { version = "0.2", default-features = false, optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5.1", default-features = false }
+tracing-appender = "0.2"
+tracing-error = "0.2"
+tracing-forest = "0.3"
+tracing-mock = { version = "=0.1.0-beta.3", features = ["tracing-subscriber"] }
+tracing-opentelemetry = "0.33"
+opentelemetry = { version = "0.32", features = ["trace"], default-features = false }
+opentelemetry_sdk = { version = "0.32", features = ["trace", "testing"], default-features = false }
+opentelemetry-stdout = { version = "0.32", features = ["trace"] }
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json"] }
+tracing-tree = "0.4"
+serde_json = "1"
+json-subscriber = { version = "0.3", features = ["tracing-opentelemetry-0-33"] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lib]
+bench = false
+
+# [[bench]]
+# name = "tracing_subscriber"
+# harness = false
+
+# [[bench]]
+# name = "operations"
+# harness = false
+
+[[example]]
+name = "panic_span_events"
+path = "examples/panics/span_events.rs"
+
+[[example]]
+name = "span_events"
+path = "examples/panics/fixed/span_events.rs"
+
+[[example]]
+name = "panic_pretty_formatter"
+path = "examples/panics/pretty_formatter.rs"
+
+[[example]]
+name = "pretty_formatter"
+path = "examples/panics/fixed/pretty_formatter.rs"
+
+[[example]]
+name = "panic_add_layer"
+path = "examples/panics/add_layer.rs"
+
+[[example]]
+name = "add_layer"
+path = "examples/panics/fixed/add_layer.rs"
+
+[[example]]
+name = "reload_otel_subscriber"
+path = "examples/reload_otel_subscriber.rs"
+
+[[example]]
+name = "reload_otel_tracing_reload"
+path = "examples/reload_otel_tracing_reload.rs"
