@@ -1,0 +1,6 @@
+# Run Miri locally (nightly required):
+#   cargo +nightly miri test --lib
+#
+# With stricter UB detection:
+#   MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alias-checker" \
+#     cargo +nightly miri test --lib
