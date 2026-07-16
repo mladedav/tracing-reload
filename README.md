@@ -55,7 +55,8 @@ be increased past 1.66, three minor versions prior. Increasing the minimum suppo
 version is not considered a semver breaking change as long as doing so complies with this policy.
 
 That said, I'll do my best to keep the minimum supported version at least at whatever uses current
-Debian stable.
+Debian stable. At the time of this writing that's 1.85 which is shipped in Debian Trixie which will
+be the stable release until half of 2027.
 
 ## License
 
