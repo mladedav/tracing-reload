@@ -29,15 +29,12 @@ where
 
         let mut fake_subscriber = ReloadSubscriber::new(inner_subscriber, filters.clone());
 
-        unsafe {
-            #[expect(clippy::unwrap_used, reason = "There is always at least one layer.")]
-            try_lock!(self.inner.layers.write())
-                .last_mut()
-                .unwrap()
-                .as_mut()
-                .get_unchecked_mut()
-                .on_layer(&mut fake_subscriber);
-        }
+        #[expect(clippy::unwrap_used, reason = "There is always at least one layer.")]
+        try_lock!(self.inner.layers.write())
+            .last_mut()
+            .unwrap()
+            .as_mut()
+            .on_layer(&mut fake_subscriber);
     }
 
     fn on_register_dispatch(&self, subscriber: &tracing_core::Dispatch) {

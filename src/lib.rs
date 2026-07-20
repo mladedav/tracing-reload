@@ -108,7 +108,6 @@ use std::{
     collections::HashMap,
     marker::PhantomData,
     num::NonZeroUsize,
-    pin::Pin,
     sync::{Arc, Mutex, OnceLock, RwLock, Weak, atomic::AtomicBool},
 };
 
@@ -182,7 +181,7 @@ pub struct Handle<L, S> {
 struct Shared<L> {
     dispatch: OnceLock<WeakDispatch>,
     dispatch_leaked: AtomicBool,
-    layers: RwLock<Vec<Pin<Box<L>>>>,
+    layers: RwLock<Vec<Box<L>>>,
     span_map: RwLock<HashMap<span::Id, usize>>,
     filters: Mutex<ReloadableFilters>,
 }
@@ -221,7 +220,7 @@ impl<L, S> Layer<L, S> {
             inner: Arc::new(Shared {
                 dispatch: OnceLock::new(),
                 dispatch_leaked: AtomicBool::new(false),
-                layers: RwLock::new(vec![Box::pin(inner)]),
+                layers: RwLock::new(vec![Box::new(inner)]),
                 span_map: RwLock::new(HashMap::new()),
                 filters: Mutex::new(ReloadableFilters::new()),
             }),
@@ -381,7 +380,7 @@ impl<L, S> Handle<L, S> {
 
                 *filters = subscriber.into_filters();
 
-                layers.push(Box::pin(next));
+                layers.push(Box::new(next));
                 drop(layers);
 
                 callsite::rebuild_interest_cache();
