@@ -3,11 +3,10 @@
 //!
 //! This crate provides a [`Layer`] type implementing the [`Layer`
 //! trait](tracing_subscriber::layer::Layer) which wraps another type implementing the same trait.
-//! The inner value is pinned on construction so its memory address is stable. Reloads publish a new
-//! value and retire the old one instead of mutating in place, which together with pinning keeps
-//! pointers returned from [`downcast_raw`] valid. The one-time [`on_layer`] setup hook is forwarded
-//! through a transient mutable reference during construction, before any such pointer is handed
-//! out.
+//! Reloads publish a new value and retire the old one instead of mutating in place, which together
+//! with not moving the old layers keeps pointers returned from [`downcast_raw`] valid. The
+//! [`on_layer`] setup hook is forwarded through a mutable reference during construction, before any
+//! such pointer is handed out.
 //!
 //! The inner value is reloaded by *replacing* it through [`Handle::reload_with`] (or
 //! [`Handle::reload`]); it is never mutated in place. Each reload publishes a new value and retires
@@ -108,7 +107,6 @@ use std::{
     collections::HashMap,
     marker::PhantomData,
     num::NonZeroUsize,
-    pin::Pin,
     sync::{Arc, Mutex, OnceLock, RwLock, Weak, atomic::AtomicBool},
 };
 
@@ -159,8 +157,8 @@ pub enum ReloadRouting {
 /// Wraps another type implementing [`tracing_subscriber::layer::Layer`] or
 /// [`tracing_subscriber::layer::Filter`], allowing it to be modified dynamically at runtime.
 ///
-/// The inner value is pinned at construction time so its address is stable.  This makes it safe to
-/// return raw pointers from
+/// The inner value is held even after the layer was reloaded if someone tried to downcast to it.
+/// This makes it safe to return raw pointers from
 /// [`Layer::downcast_raw`](tracing_subscriber::layer::Layer::downcast_raw).
 #[derive(Debug)]
 pub struct Layer<L, S> {
@@ -182,7 +180,7 @@ pub struct Handle<L, S> {
 struct Shared<L> {
     dispatch: OnceLock<WeakDispatch>,
     dispatch_leaked: AtomicBool,
-    layers: RwLock<Vec<Pin<Box<L>>>>,
+    layers: RwLock<Vec<Box<L>>>,
     span_map: RwLock<HashMap<span::Id, usize>>,
     filters: Mutex<ReloadableFilters>,
 }
@@ -221,7 +219,7 @@ impl<L, S> Layer<L, S> {
             inner: Arc::new(Shared {
                 dispatch: OnceLock::new(),
                 dispatch_leaked: AtomicBool::new(false),
-                layers: RwLock::new(vec![Box::pin(inner)]),
+                layers: RwLock::new(vec![Box::new(inner)]),
                 span_map: RwLock::new(HashMap::new()),
                 filters: Mutex::new(ReloadableFilters::new()),
             }),
@@ -381,7 +379,7 @@ impl<L, S> Handle<L, S> {
 
                 *filters = subscriber.into_filters();
 
-                layers.push(Box::pin(next));
+                layers.push(Box::new(next));
                 drop(layers);
 
                 callsite::rebuild_interest_cache();
