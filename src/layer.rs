@@ -25,6 +25,12 @@ where
             filters.free.push(subscriber.register_filter());
         }
 
+        // SAFETY
+        // We hold the subscriber just until the end of this function. The `'static` extension is
+        // needed just so `ReloadSubscriber: 'static` but we do not give anyone else direct access
+        // to the reference inside and pass the fake subscriber with a set lifetime so it itself
+        // cannot outlive that method call. And it is dropped at the end of this method along with
+        // the extended reference so it's ok.
         let inner_subscriber = unsafe { std::mem::transmute::<&'_ S, &'static S>(&*subscriber) };
 
         let mut fake_subscriber = ReloadSubscriber::new(inner_subscriber, filters.clone());
