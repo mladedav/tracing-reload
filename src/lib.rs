@@ -97,7 +97,6 @@
     clippy::unwrap_used
 )]
 #![expect(
-    clippy::missing_panics_doc,
     clippy::missing_errors_doc,
     reason = "These need some more cleanup and documenting."
 )]
@@ -107,6 +106,7 @@ use std::{
     collections::HashMap,
     marker::PhantomData,
     num::NonZeroUsize,
+    ops::{Deref, DerefMut},
     sync::{Arc, Mutex, OnceLock, RwLock, Weak, atomic::AtomicBool},
 };
 
@@ -180,9 +180,62 @@ pub struct Handle<L, S> {
 struct Shared<L> {
     dispatch: OnceLock<WeakDispatch>,
     dispatch_leaked: AtomicBool,
-    layers: RwLock<Vec<Box<L>>>,
-    span_map: RwLock<HashMap<span::Id, usize>>,
+
+    layers: RwLock<Layers<L>>,
+
+    span_map: RwLock<HashMap<span::Id, Arc<L>>>,
     filters: Mutex<ReloadableFilters>,
+}
+
+#[derive(Debug)]
+struct Layers<L> {
+    latest: InnerLayer<Arc<L>>,
+    historical: Vec<InnerLayer<Option<Arc<L>>>>,
+}
+
+impl<L> Layers<L> {
+    fn new(inner: L) -> Self {
+        Self {
+            latest: InnerLayer::new(Arc::new(inner)),
+            historical: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, next: L) {
+        let previous = std::mem::replace(&mut self.latest, InnerLayer::new(Arc::new(next)));
+        self.historical.push(previous.map(Some));
+    }
+}
+
+#[derive(Debug)]
+struct InnerLayer<L> {
+    inner: L,
+}
+
+impl<L> Deref for InnerLayer<L> {
+    type Target = L;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<L> DerefMut for InnerLayer<L> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl<L> InnerLayer<L> {
+    fn new(inner: L) -> Self {
+        Self { inner }
+    }
+
+    fn map<L2, F: FnOnce(L) -> L2>(self, f: F) -> InnerLayer<L2> {
+        InnerLayer::<L2> {
+            inner: f(self.inner),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -219,7 +272,7 @@ impl<L, S> Layer<L, S> {
             inner: Arc::new(Shared {
                 dispatch: OnceLock::new(),
                 dispatch_leaked: AtomicBool::new(false),
-                layers: RwLock::new(vec![Box::new(inner)]),
+                layers: RwLock::new(Layers::new(inner)),
                 span_map: RwLock::new(HashMap::new()),
                 filters: Mutex::new(ReloadableFilters::new()),
             }),
@@ -240,12 +293,12 @@ impl<L, S> Layer<L, S> {
     }
 
     fn with_span<T>(&self, span: &span::Id, mapper: impl FnOnce(&L) -> T) -> Option<T> {
-        let index = *try_lock!(self.inner.span_map.read(), else return None).get(span)?;
-        let layers = try_lock!(self.inner.layers.read(), else return None);
-        let layer = layers.get(index)?;
+        let layers = try_lock!(self.inner.span_map.read(), else return None);
+        let layer = layers.get(span)?;
         Some(mapper(layer))
     }
 
+    #[must_use]
     fn with_ctx<F, T>(&self, f: F) -> Option<T>
     where
         S: Subscriber,
@@ -359,8 +412,7 @@ impl<L, S> Handle<L, S> {
 
                 let mut layers =
                     try_lock!(inner.layers.write(), else return Err(Error::poisoned()));
-                #[expect(clippy::unwrap_used, reason = "There is always at least one layer.")]
-                let mut next = f(layers.last().unwrap());
+                let mut next = f(&layers.latest);
 
                 let mut filters =
                     try_lock!(inner.filters.lock(), else return Err(Error::poisoned()));
@@ -379,7 +431,7 @@ impl<L, S> Handle<L, S> {
 
                 *filters = subscriber.into_filters();
 
-                layers.push(Box::new(next));
+                layers.push(next);
                 drop(layers);
 
                 callsite::rebuild_interest_cache();
@@ -410,8 +462,7 @@ impl<L, S> Handle<L, S> {
     pub fn with_current<T>(&self, f: impl FnOnce(&L) -> T) -> Result<T, Error> {
         let inner = self.inner.upgrade().ok_or_else(Error::subscriber_gone)?;
         let layers = try_lock!(inner.layers.read(), else return Err(Error::poisoned()));
-        #[expect(clippy::unwrap_used, reason = "There is always at least one layer.")]
-        Ok(f(layers.last().unwrap()))
+        Ok(f(&layers.latest))
     }
 }
 

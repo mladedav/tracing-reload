@@ -1,6 +1,7 @@
-#![expect(clippy::unwrap_used, reason = "This file needs a bit more cleanup.")]
-
-use std::{ptr, sync::atomic::Ordering};
+use std::{
+    ptr,
+    sync::{Arc, atomic::Ordering},
+};
 
 use tracing_core::{
     Event,
@@ -35,12 +36,13 @@ where
 
         let mut fake_subscriber = ReloadSubscriber::new(inner_subscriber, filters.clone());
 
-        #[expect(clippy::unwrap_used, reason = "There is always at least one layer.")]
-        try_lock!(self.inner.layers.write())
-            .last_mut()
-            .unwrap()
-            .as_mut()
-            .on_layer(&mut fake_subscriber);
+        let mut layers = try_lock!(self.inner.layers.write());
+
+        let Some(layer) = Arc::get_mut(&mut layers.latest) else {
+            return;
+        };
+
+        layer.on_layer(&mut fake_subscriber);
     }
 
     fn on_register_dispatch(&self, subscriber: &tracing_core::Dispatch) {
@@ -58,8 +60,7 @@ where
             .expect("on_register_dispatch should be called only once");
 
         <L as layer::Layer<ReloadSubscriber<S>>>::on_register_dispatch(
-            #[expect(clippy::unwrap_used, reason = "There is always at least one layer.")]
-            try_lock!(self.inner.layers.read()).last().unwrap(),
+            &try_lock!(self.inner.layers.read()).latest,
             subscriber,
         );
     }
@@ -67,10 +68,7 @@ where
     #[inline]
     fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
         <L as layer::Layer<ReloadSubscriber<S>>>::register_callsite(
-            #[expect(clippy::unwrap_used, reason = "There is always at least one layer.")]
-            try_lock!(self.inner.layers.read(), else return Interest::sometimes())
-                .last()
-                .unwrap(),
+            &try_lock!(self.inner.layers.read(), else return Interest::sometimes()).latest,
             metadata,
         )
     }
@@ -83,10 +81,8 @@ where
                       panicking."
         )]
         self.with_ctx(move |ctx| {
-            #[expect(clippy::unwrap_used, reason = "There is always at least one layer.")]
             try_lock!(self.inner.layers.read(), else return false)
-                .last()
-                .unwrap()
+                .latest
                 .enabled(metadata, ctx)
         })
         .expect("could not get value for enabled")
@@ -100,10 +96,8 @@ where
                       panicking."
         )]
         self.with_ctx(move |ctx| {
-            #[expect(clippy::unwrap_used, reason = "There is always at least one layer.")]
             try_lock!(self.inner.layers.read(), else return false)
-                .last()
-                .unwrap()
+                .latest
                 .event_enabled(event, ctx)
         })
         .expect("could not get value for event_enabled")
@@ -112,42 +106,43 @@ where
     #[inline]
     fn max_level_hint(&self) -> Option<LevelFilter> {
         <L as layer::Layer<ReloadSubscriber<S>>>::max_level_hint(
-            #[expect(clippy::unwrap_used, reason = "There is always at least one layer.")]
-            try_lock!(self.inner.layers.read(), else return None)
-                .last()
-                .unwrap(),
+            &try_lock!(self.inner.layers.read(), else return None).latest,
         )
     }
 
     #[inline]
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: layer::Context<'_, S>) {
-        let index = {
-            let layers = try_lock!(self.inner.layers.read());
-            let index = match self.span_routing {
-                ReloadRouting::NewSpanToLatestLayer => layers.len() - 1,
-                ReloadRouting::NewSpanToParentLayer => {
-                    let parent_id = attrs.parent().cloned().or_else(|| {
-                        attrs
-                            .is_contextual()
-                            .then_some(ctx.current_span().id().cloned())
-                            .flatten()
-                    });
-                    parent_id
-                        .and_then(|parent_id| {
-                            let span_map = try_lock!(self.inner.span_map.read(), else return None);
-                            span_map.get(&parent_id).copied()
-                        })
-                        .unwrap_or(layers.len() - 1)
-                },
-            };
-            self.with_ctx(move |ctx| {
-                layers.get(index).unwrap().on_new_span(attrs, id, ctx);
-            })
-            .unwrap();
-            index
+        let layer = match self.span_routing {
+            ReloadRouting::NewSpanToLatestLayer => None,
+            ReloadRouting::NewSpanToParentLayer => {
+                let parent_id = attrs.parent().cloned().or_else(|| {
+                    attrs
+                        .is_contextual()
+                        .then_some(ctx.current_span().id().cloned())
+                        .flatten()
+                });
+                parent_id.and_then(|parent_id| {
+                    let span_map = try_lock!(self.inner.span_map.read(), else return None);
+                    span_map.get(&parent_id).cloned()
+                })
+            },
         };
+
+        let Some(layer) = layer.or_else(|| {
+            let layers = try_lock!(self.inner.layers.read(), else return None);
+            Some(Arc::clone(&layers.latest))
+        }) else {
+            return;
+        };
+
+        let Some(()) = self.with_ctx(|ctx| {
+            layer.on_new_span(attrs, id, ctx);
+        }) else {
+            return;
+        };
+
         let mut span_map = try_lock!(self.inner.span_map.write());
-        span_map.insert(id.clone(), index);
+        span_map.insert(id.clone(), layer);
     }
 
     #[inline]
@@ -159,17 +154,14 @@ where
 
     #[inline]
     fn on_follows_from(&self, span: &span::Id, follows: &span::Id, _ctx: layer::Context<'_, S>) {
-        let idx = {
+        let layer = {
             let span_map = try_lock!(self.inner.span_map.read());
-            span_map.get(span).copied()
+            span_map.get(span).cloned()
         };
-        if let Some(idx) = idx {
-            let current = try_lock!(self.inner.layers.read());
-            if let Some(layer) = current.get(idx) {
-                self.with_ctx(move |ctx| {
-                    layer.on_follows_from(span, follows, ctx);
-                });
-            }
+        if let Some(layer) = layer {
+            _ = self.with_ctx(move |ctx| {
+                layer.on_follows_from(span, follows, ctx);
+            });
         }
     }
 
@@ -185,11 +177,9 @@ where
                 self.with_ctx(move |ctx| layer.on_event(event, ctx))
             });
         } else {
-            self.with_ctx(move |ctx| {
-                #[expect(clippy::unwrap_used, reason = "There is always at least one layer.")]
+            _ = self.with_ctx(move |ctx| {
                 try_lock!(self.inner.layers.read())
-                    .last()
-                    .unwrap()
+                    .latest
                     .on_event(event, ctx);
             });
         }
@@ -209,31 +199,30 @@ where
 
     #[inline]
     fn on_close(&self, id: span::Id, _ctx: layer::Context<'_, S>) {
-        let index = {
+        let layer = {
             let mut span_map = try_lock!(self.inner.span_map.write());
-            span_map.remove(&id).unwrap()
+            span_map.remove(&id)
         };
-        self.with_ctx(move |ctx| {
-            try_lock!(self.inner.layers.read())
-                .get(index)
-                .unwrap()
-                .on_close(id, ctx);
-        });
+        if let Some(layer) = layer {
+            _ = self.with_ctx(move |ctx| {
+                layer.on_close(id, ctx);
+            });
+        }
     }
 
     #[inline]
     fn on_id_change(&self, old: &span::Id, new: &span::Id, _ctx: layer::Context<'_, S>) {
-        let index = {
+        let layer = {
             let mut span_map = try_lock!(self.inner.span_map.write());
-            let index = span_map.remove(old).unwrap();
-            span_map.insert(new.clone(), index);
-            index
+            let Some(layer) = span_map.remove(old) else {
+                return;
+            };
+            span_map.insert(new.clone(), layer.clone());
+            layer
         };
-        self.with_ctx(move |ctx| {
-            try_lock!(self.inner.layers.read())
-                .get(index)
-                .unwrap()
-                .on_id_change(old, new, ctx);
+
+        _ = self.with_ctx(move |ctx| {
+            layer.on_id_change(old, new, ctx);
         });
     }
 
@@ -278,10 +267,8 @@ where
             );
         }
 
-        let current = try_lock!(self.inner.layers.read(), else return None);
+        let layers = try_lock!(self.inner.layers.read(), else return None);
 
-        current.last().and_then(|layer| unsafe {
-            <L as layer::Layer<ReloadSubscriber<S>>>::downcast_raw(layer, id)
-        })
+        unsafe { <L as layer::Layer<ReloadSubscriber<S>>>::downcast_raw(&layers.latest, id) }
     }
 }
