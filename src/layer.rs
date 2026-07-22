@@ -38,6 +38,12 @@ where
 
         let mut layers = try_lock!(self.inner.layers.write());
 
+        // This may look weird but if someone called this method that means they have a unique
+        // reference. In that case whoever called `downcast_raw` before, doesn't hold their shared
+        // reference anymore. So all pointer we might have given out are no longer valid and we can
+        // pretend we haven't given out any.
+        layers.latest.downcasted.store(false, Ordering::Relaxed);
+
         let Some(layer) = Arc::get_mut(&mut layers.latest) else {
             return;
         };
@@ -269,6 +275,13 @@ where
 
         let layers = try_lock!(self.inner.layers.read(), else return None);
 
-        unsafe { <L as layer::Layer<ReloadSubscriber<S>>>::downcast_raw(&layers.latest, id) }
+        let ptr =
+            unsafe { <L as layer::Layer<ReloadSubscriber<S>>>::downcast_raw(&layers.latest, id) };
+
+        if ptr.is_some() {
+            layers.latest.downcasted.store(true, Ordering::Relaxed);
+        }
+
+        ptr
     }
 }

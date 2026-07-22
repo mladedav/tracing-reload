@@ -107,7 +107,14 @@ use std::{
     marker::PhantomData,
     num::NonZeroUsize,
     ops::{Deref, DerefMut},
-    sync::{Arc, Mutex, OnceLock, RwLock, Weak, atomic::AtomicBool},
+    sync::{
+        Arc,
+        Mutex,
+        OnceLock,
+        RwLock,
+        Weak,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use subscriber_cache::SubscriberCache;
@@ -203,13 +210,23 @@ impl<L> Layers<L> {
 
     fn push(&mut self, next: L) {
         let previous = std::mem::replace(&mut self.latest, InnerLayer::new(Arc::new(next)));
-        self.historical.push(previous.map(Some));
+        // Downcasts happen only to the latest layer. If none happened until now, we can be sure
+        // there will be no downcasts. So we can get rid of this layer. It might not be dropped
+        // right away as the span map might still hold another reference to the same layer so the
+        // drop will happen once all of the layer's spans are closed.
+        let previous = if previous.downcasted.load(Ordering::Relaxed) {
+            previous.map(Some)
+        } else {
+            previous.map(|_| None)
+        };
+        self.historical.push(previous);
     }
 }
 
 #[derive(Debug)]
 struct InnerLayer<L> {
     inner: L,
+    downcasted: AtomicBool,
 }
 
 impl<L> Deref for InnerLayer<L> {
@@ -228,12 +245,16 @@ impl<L> DerefMut for InnerLayer<L> {
 
 impl<L> InnerLayer<L> {
     fn new(inner: L) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            downcasted: AtomicBool::new(false),
+        }
     }
 
     fn map<L2, F: FnOnce(L) -> L2>(self, f: F) -> InnerLayer<L2> {
         InnerLayer::<L2> {
             inner: f(self.inner),
+            downcasted: self.downcasted,
         }
     }
 }
@@ -682,5 +703,77 @@ mod tests {
 
         handle2.assert_finished();
         handle1.assert_finished();
+    }
+
+    #[test]
+    fn cleanup_layers() {
+        struct DropLayer(Arc<AtomicBool>);
+        impl<S: Subscriber> tracing_subscriber::Layer<S> for DropLayer {}
+        impl Drop for DropLayer {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+        impl DropLayer {
+            fn new() -> Self {
+                Self(Arc::new(AtomicBool::new(false)))
+            }
+        }
+
+        let layer = DropLayer::new();
+        let first_dropped = layer.0.clone();
+        let (reload, handle) = Layer::new(layer);
+        let subscriber = Registry::default().with(reload);
+
+        let (third_dropped, fourth_dropped) = tracing::subscriber::with_default(subscriber, || {
+            assert!(!first_dropped.load(Ordering::Relaxed));
+            let layer = DropLayer::new();
+            let second_dropped = layer.0.clone();
+
+            // No spans open, no downcast, should be dropped right away
+            handle.reload(layer).unwrap();
+            assert!(first_dropped.load(Ordering::Relaxed));
+            assert!(!second_dropped.load(Ordering::Relaxed));
+
+            let span = tracing::info_span!("span");
+
+            let layer = DropLayer::new();
+            let third_dropped = layer.0.clone();
+
+            // The open span should keep the layer present.
+            handle.reload(layer).unwrap();
+            assert!(!second_dropped.load(Ordering::Relaxed));
+            assert!(!third_dropped.load(Ordering::Relaxed));
+
+            // This should prevent the latest layer from being dropped before the whole reload layer
+            // is.
+            tracing::dispatcher::get_default(|dispatch| {
+                dispatch.downcast_ref::<DropLayer>();
+            });
+
+            assert!(!second_dropped.load(Ordering::Relaxed));
+            assert!(!third_dropped.load(Ordering::Relaxed));
+
+            let layer = DropLayer::new();
+            let fourth_dropped = layer.0.clone();
+
+            // One layer still has existing span, one was downcasted, one is current.
+            handle.reload(layer).unwrap();
+            assert!(!second_dropped.load(Ordering::Relaxed));
+            assert!(!third_dropped.load(Ordering::Relaxed));
+            assert!(!fourth_dropped.load(Ordering::Relaxed));
+
+            // Dropping the span should clean up the layer that held it.
+            drop(span);
+            assert!(second_dropped.load(Ordering::Relaxed));
+            assert!(!third_dropped.load(Ordering::Relaxed));
+            assert!(!fourth_dropped.load(Ordering::Relaxed));
+
+            (third_dropped, fourth_dropped)
+        });
+
+        // Everything should be cleaned up in the end.
+        assert!(third_dropped.load(Ordering::Relaxed));
+        assert!(fourth_dropped.load(Ordering::Relaxed));
     }
 }
