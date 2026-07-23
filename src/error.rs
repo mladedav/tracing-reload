@@ -1,5 +1,3 @@
-#![expect(missing_docs, reason = "We'll do it later.")]
-
 use std::{error, fmt};
 
 /// Indicates that an error occurred when accessing a reloadable layer.
@@ -34,16 +32,24 @@ impl Error {
         }
     }
 
+    /// This signals that the error happened because we tried to lock a poisoned mutex, signalling
+    /// that a panic most likely occurred previously on another thread inside a this library.
     #[must_use]
     pub fn is_poisoned(&self) -> bool {
         matches!(self.kind, ErrorKind::Poisoned)
     }
 
+    /// This signals that the error happened because someone called an operation after the
+    /// subscriber has been deregistered. This will most likely happen when someone tries to reload
+    /// a layer on a subscriber that no longer exists.
     #[must_use]
     pub fn is_gone(&self) -> bool {
         matches!(self.kind, ErrorKind::SubscriberGone)
     }
 
+    /// This signals that the error happened because someone called an operation before the
+    /// subscriber has been registered. This will most likely happen when someone tries to reload a
+    /// layer on a subscriber that was not yet registered as a [`Dispatch`](tracing::Dispatch).
     #[must_use]
     pub fn is_uninitialized(&self) -> bool {
         matches!(self.kind, ErrorKind::SubscriberNotInitialized)
