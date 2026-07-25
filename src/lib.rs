@@ -386,7 +386,7 @@ impl<L, S> Layer<L, S> {
             // do something *antagonistic* such as:
             //
             // ```rs
-            // let layer = Arc::new(layer);
+            // let layer = Rc::new(layer);
             // SOME_THREAD_LOCAL.set(Some(Rc::clone(&layer)));
             // stuff…
             //
