@@ -326,10 +326,10 @@ impl<L, S> Layer<L, S> {
         F: FnOnce(Context<'_, subscriber::ReloadSubscriber<S>>) -> T,
         T: 'static,
     {
-        type DynFnOnce<'a, S, T> =
-            dyn FnOnce(Context<'_, subscriber::ReloadSubscriber<S>>) -> T + 'a;
+        type DynFnMut<'a, S, T> =
+            dyn FnMut(Context<'_, subscriber::ReloadSubscriber<S>>) -> T + 'a;
         struct ContextStealer<S: 'static, T>(
-            Cell<Option<Box<DynFnOnce<'static, S, T>>>>,
+            Cell<Option<&'static mut DynFnMut<'static, S, T>>>,
             Cell<Option<T>>,
         );
 
@@ -364,17 +364,40 @@ impl<L, S> Layer<L, S> {
                 try_lock!(self.inner.filters.lock(), else return None).clone(),
             );
 
-            // TODO is there a better way to make `F` into `F + 'static` without boxing?
-            let boxed: Box<DynFnOnce<'_, S, T>> = Box::new(f);
+            // TODO is there a better way to make `F` into `F + 'static` without dyning?
+            let mut f_once = Some(f);
+            let mut f = move |c| {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "f is called only once (poorman's `&own` ref)",
+                )]
+                f_once.take().unwrap()(c)
+            };
+            let dyned: &mut DynFnMut<'_, S, T> = &mut f;
 
             // SAFETY
             // The whole `'static` bound exists just so we can use the function inside the `Layer`
-            // which has to be `'static` same as the `Subscriber` itself. We call the
-            // closure will outlive this function and is called inside this function and
-            // then it's gone afterwards so this is safe to do and call.
+            // which has to be `'static`, same as the `Subscriber` itself. The closure will
+            // outlive this scope (see `drop(f)`) and it is only called inside this function, before
+            // the end of the scope, so this is safe to do and call.
+            //
+            // This does assume that neither `subscriber.with()` nor `subscriber.record_follows_from()`
+            // do *anything* else with our layer other than calling this method. Notably, they do not
+            // do something *antagonistic* such as:
+            //
+            // ```rs
+            // let layer = Arc::new(layer);
+            // SOME_THREAD_LOCAL.set(Some(Rc::clone(&layer)));
+            // stuff…
+            //
+            // // later on, in some other part of subscriber:
+            // if let Some(layer) = SOME_THREAD_LOCAL.replace(None) {
+            //     stuff(layer);
+            // }
+            // ```
             let transmuted = unsafe {
-                std::mem::transmute::<Box<DynFnOnce<'_, S, T>>, Box<DynFnOnce<'static, S, T>>>(
-                    boxed,
+                std::mem::transmute::<&mut DynFnOnce<'_, S, T>, &'static mut DynFnOnce<'static, S, T>>(
+                    dyned,
                 )
             };
 
@@ -403,6 +426,7 @@ impl<L, S> Layer<L, S> {
             // Check invariants after the unsafe usage. The reverse drop order at the end of the
             // function would handle this the same way, but let's be explicit.
             drop(layered);
+            drop(f);
 
             Some(result)
         })?
