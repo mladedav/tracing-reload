@@ -396,7 +396,7 @@ impl<L, S> Layer<L, S> {
             // }
             // ```
             let transmuted = unsafe {
-                std::mem::transmute::<&mut DynFnOnce<'_, S, T>, &'static mut DynFnOnce<'static, S, T>>(
+                std::mem::transmute::<&mut DynFnMut<'_, S, T>, &'static mut DynFnMut<'static, S, T>>(
                     dyned,
                 )
             };
