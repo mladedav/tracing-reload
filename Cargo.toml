@@ -1,7 +1,7 @@
 [package]
 name = "tracing-reload"
 description = "Tracing layer that can be safely reloaded"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 homepage = "https://github.com/mladedav/tracing-reload"
